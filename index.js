@@ -31,12 +31,16 @@ function customRanges(text, template) {
     return lazy && JSON.stringify(lazy) === JSON.stringify(greedy) ? lazy : null;
 }
 
-export function recognize(body, template = '') {
-    if (body?.tool_choice !== 'none' || !Array.isArray(body.messages)) return null;
+function isSummaryRequest(body) {
+    if (body?.tool_choice !== 'none' || !Array.isArray(body.messages)) return false;
     const checklist = body.messages.at(-1);
-    if (checklist?.role !== 'system' || !checklist.content?.startsWith('【输出前核查】\n')) return null;
-    if (!(body.chat_completion_source === 'openai' && typeof body.reverse_proxy === 'string') &&
-        !(body.chat_completion_source === 'custom' && typeof body.custom_url === 'string')) return null;
+    return checklist?.role === 'system' && checklist.content?.startsWith('【输出前核查】\n') &&
+        ((body.chat_completion_source === 'openai' && typeof body.reverse_proxy === 'string') ||
+        (body.chat_completion_source === 'custom' && typeof body.custom_url === 'string'));
+}
+
+export function recognize(body, template = '') {
+    if (!isSummaryRequest(body)) return null;
     const users = body.messages.map((message, index) => ({ ...message, index })).filter(m => m.role === 'user');
     if (users.length !== 1 || typeof users[0].content !== 'string') return null;
     const { content: text, index } = users[0];
@@ -180,47 +184,62 @@ export function sendWithTimeout(fetchPrevious, receiver, input, init, timeoutSec
     });
 }
 
-export function install(win) {
+export function install(win, showPreview = preview) {
     const fetchPrevious = win.fetch;
     let operation;
-    function arm(host, floor) {
+    function arm(root, floor, busySelector) {
         operation?.observer.disconnect();
-        const root = host.shadowRoot;
-        const current = { host, session: createSession(preview, floor), started: false };
-        function observe() {
-            const busy = !!root.querySelector('.bbs-fp-spinner');
-            if (busy) current.started = true;
-            if (current.started && !busy) {
-                current.observer.disconnect();
-                if (operation === current) operation = undefined;
+        const current = { started: false, sawRequest: false, previewed: false };
+        current.session = createSession((text, number) => {
+            current.previewed = true;
+            return showPreview(text, number);
+        }, floor);
+        function finish() {
+            current.observer.disconnect();
+            if (operation !== current) return;
+            operation = undefined;
+            if (current.started && !current.previewed &&
+                (current.sawRequest || !summaryChannel(win.SillyTavern?.getContext()?.extensionSettings))) {
+                win.toastr?.warning(current.sawRequest
+                    ? '柏宝书摘要预览：这次认不出正文在哪里，已按原样发送。'
+                    : '柏宝书摘要预览：这次没有拦到摘要请求。如果柏宝书的摘要设成了跟随主 API，预览框拦不到，请在柏宝书设置里给摘要指派一个副 API 渠道。');
             }
         }
-        current.observer = new MutationObserver(observe);
+        function observe() {
+            const busy = !!root.querySelector(busySelector);
+            if (busy) current.started = true;
+            if (current.started && !busy) finish();
+        }
+        current.observer = new win.MutationObserver(observe);
         current.observer.observe(root, { subtree: true, childList: true });
         operation = current;
         // 入口早退时不留下手动意图，异步准备期间上游已同步标记 busy。
         setTimeout(() => {
             observe();
-            if (!current.started) {
-                current.observer.disconnect();
-                if (operation === current) operation = undefined;
-            }
+            if (!current.started) finish();
         }, 0);
     }
     win.document.addEventListener('click', event => {
         const path = event.composedPath();
-        const button = path.find(node => node instanceof Element && node.matches('button'));
+        const button = path.find(node => node instanceof win.Element && node.matches('button'));
         if (!button || button.disabled) return;
         if (button.matches('.bbs-fp-summarybtn') && /^生成楼层 #\d+ 的摘要$/.test(button.title)) {
-            const host = path.find(node => node instanceof Element && node.hasAttribute('data-bbs-fp-floor'));
-            const mes = path.find(node => node instanceof Element && node.matches('.mes[mesid]'));
-            if (host && mes) arm(host, mes.getAttribute('mesid'));
+            const host = path.find(node => node instanceof win.Element && node.hasAttribute('data-bbs-fp-floor'));
+            const mes = path.find(node => node instanceof win.Element && node.matches('.mes[mesid]'));
+            if (host && mes) arm(host.shadowRoot, mes.getAttribute('mesid'), '.bbs-fp-spinner');
+        }
+        if (button.matches('.bbs-pending-chip')) {
+            const pendingFloor = button.title.match(/^对楼层 #(\d+) 生成摘要$/);
+            const root = button.getRootNode();
+            if (pendingFloor && root.host?.id === 'bbs-app-host') {
+                arm(root, pendingFloor[1], `.bbs-pending-chip[title="${button.title}"] .bbs-pending-spin`);
+            }
         }
         const modal = button.closest('.bbs-modal-confirm');
         const match = modal?.getAttribute('aria-label')?.match(/^重新摘要楼层 #(\d+)$/);
         if (match && button.matches('.bbs-btn-primary')) {
             const host = win.document.querySelector(`[data-bbs-fp-floor="${match[1]}"]`);
-            if (host) arm(host, match[1]);
+            if (host) arm(host.shadowRoot, match[1], '.bbs-fp-spinner');
         }
     }, true);
     win.fetch = async function (input, init) {
@@ -231,6 +250,7 @@ export function install(win) {
         }
         const current = operation;
         const body = await new Response(init.body).json().then(value => value, () => null);
+        if (isSummaryRequest(body)) current.sawRequest = true;
         const settings = win.SillyTavern?.getContext()?.extensionSettings;
         const recognized = recognize(body, settings?.baibai_book?.prompts?.summary);
         if (!recognized) return fetchPrevious.call(this, input, init);
