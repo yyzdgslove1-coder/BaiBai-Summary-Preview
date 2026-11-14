@@ -1,3 +1,5 @@
+export const VERSION = '0.1.2';
+
 const ENDPOINT = '/api/backends/chat-completions/generate';
 const CUSTOM_SUFFIX = '\n\n【主角当前档案(本轮之前,只读参考)】\n';
 const HISTORY = '【前情提要(本轮之前的历史剧情摘要,只读参考,按时间先后)】';
@@ -262,4 +264,89 @@ export function install(win, showPreview = preview) {
     };
 }
 
-if (typeof window !== 'undefined') install(window);
+export function readBookVersion(doc) {
+    // 柏宝书主界面的样式表与脚本同在 dist，以其目录关联脚本，文件夹可任意命名。
+    const stylesheet = doc.getElementById('bbs-app-host')?.shadowRoot?.querySelector('link[rel="stylesheet"][href]');
+    if (!stylesheet) return null;
+    const scriptUrl = new URL('index.js', stylesheet.href);
+    const script = [...doc.querySelectorAll('script[src]')].find(element => {
+        const url = new URL(element.src, doc.baseURI);
+        return url.origin === scriptUrl.origin && url.pathname === scriptUrl.pathname &&
+            url.pathname.endsWith('/dist/index.js');
+    });
+    return script ? new URL(script.src, doc.baseURI).searchParams.get('ver') || null : null;
+}
+
+export function summaryChannelText(settings) {
+    if (!settings?.baibai_book) return '没读到柏宝书设置';
+    const channel = summaryChannel(settings);
+    return channel
+        ? `摘要渠道：${channel.name}（${channel.model}）`
+        : '摘要跟随主 API，预览框拦不到。请在柏宝书设置里给摘要指派一个副 API 渠道';
+}
+
+export function installStatusPanel(win) {
+    const doc = win.document;
+    function mount() {
+        if (doc.getElementById('bbsp-settings')) return true;
+        const target = doc.getElementById('extensions_settings2') || doc.getElementById('extensions_settings');
+        if (!target) return false;
+        const container = doc.createElement('div');
+        container.id = 'bbsp-settings';
+        container.className = 'extension_container';
+        const drawer = doc.createElement('div');
+        drawer.className = 'inline-drawer';
+        const header = doc.createElement('div');
+        header.className = 'inline-drawer-toggle inline-drawer-header';
+        const title = doc.createElement('b');
+        title.textContent = '柏宝书摘要预览';
+        const icon = doc.createElement('div');
+        icon.className = 'inline-drawer-icon fa-solid fa-circle-chevron-down down';
+        header.append(title, icon);
+        const content = doc.createElement('div');
+        content.className = 'inline-drawer-content';
+        content.style.display = 'none';
+        const loaded = doc.createElement('p');
+        const book = doc.createElement('p');
+        const channel = doc.createElement('p');
+        const summaryPrompt = doc.createElement('p');
+        const usage = doc.createElement('p');
+        usage.textContent = '在柏宝书「摘要」页点「未摘要楼层」的楼层号，或点聊天楼层面板的摘要按钮，发送前会先弹出预览框。';
+        function refresh() {
+            loaded.textContent = `已加载 ${VERSION}`;
+            const version = readBookVersion(doc);
+            book.textContent = `柏宝书版本：${version || '未识别'}`;
+            if (version && version !== '1.3.5') book.textContent += '。本扩展按 1.3.5 适配，版本不同可能拦不到';
+            const settings = win.SillyTavern?.getContext()?.extensionSettings;
+            channel.textContent = summaryChannelText(settings);
+            summaryPrompt.hidden = !settings?.baibai_book;
+            const template = settings?.baibai_book?.prompts?.summary?.trim() ?? '';
+            if (summaryPrompt.hidden) {
+                summaryPrompt.textContent = '';
+            } else if (!template) {
+                summaryPrompt.textContent = '摘要提示词：柏宝书内置';
+            } else if (template.includes('{{content}}')) {
+                summaryPrompt.textContent = '摘要提示词：自定义，含 {{content}}';
+            } else {
+                summaryPrompt.textContent = '摘要提示词：自定义，但缺少 {{content}}。柏宝书这时不会把这一楼的正文发给 AI，摘要会对不上原文。请在柏宝书的摘要提示词里加上 {{content}}。';
+            }
+        }
+        header.addEventListener('click', refresh);
+        refresh();
+        content.append(loaded, book, channel, summaryPrompt, usage);
+        drawer.append(header, content);
+        container.append(drawer);
+        target.append(container);
+        return true;
+    }
+    if (mount()) return;
+    const observer = new win.MutationObserver(() => {
+        if (mount()) observer.disconnect();
+    });
+    observer.observe(doc.documentElement, { childList: true, subtree: true });
+}
+
+if (typeof window !== 'undefined') {
+    install(window);
+    installStatusPanel(window);
+}
