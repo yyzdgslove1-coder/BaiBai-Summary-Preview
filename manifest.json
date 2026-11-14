@@ -1,0 +1,11 @@
+{
+  "display_name": "柏宝书摘要预览",
+  "version": "0.1.0",
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Kestrael",
+  "homePage": "https://github.com/yyzdgslove1-coder/BaiBai-Summary-Preview",
+  "auto_update": false,
+  "requires": [],
+  "optional": []
+}
